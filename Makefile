@@ -1,9 +1,10 @@
-CFLAGS=-I../../src/include -pthread -std=gnu99  -lm -lrt
+CFLAGS=-std=gnu99
+LDFLAGS=-pthread -lrados -ljansson -lm
 all: cptt
 
 cptt: cptt.c
 	cc -g -c cptt.c -o cptt.o $(CFLAGS)
-	cc -g cptt.o -lrados -pthread -o cptt -L/usr/local/lib/ -ljansson $(LDFLAGS)
+	cc -g cptt.o -o cptt $(LDFLAGS)
 
 clean:
 	rm cptt.o cptt
