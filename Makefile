@@ -1,4 +1,4 @@
-CFLAGS=-I../../src/include -pthread -std=gnu99
+CFLAGS=-I../../src/include -pthread -std=gnu99  -lm -lrt
 all: cptt
 
 cptt: cptt.c
