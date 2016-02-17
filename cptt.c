@@ -600,14 +600,14 @@ int pars_workload_definition(char *buff, global_config_t *cptt) {
     const char *tmp_str=json_string_value(tmp_object1);
     cptt->ceph_conf.pool_name=(char *)malloc(strlen(tmp_str)*sizeof(char));
     strcpy(cptt->ceph_conf.pool_name,tmp_str);
-
+    #if 0
     tmp_object1 = json_object_get(root, "start_at");
     if(!json_is_integer(tmp_object1)){
         fprintf(stderr, "error: start_at is not string\n");
         return 1;
     }
     g_start_at=json_integer_value(tmp_object1);
-
+    #endif
     tmp_object1 = json_object_get(root, "works");
     if(!json_is_array(tmp_object1)){
         fprintf(stderr, "error: start_at is not string\n");
@@ -682,9 +682,9 @@ void process_mgmt_request(void *request_struct_void){
 
     if (strcmp(buffer,"Status\n")==0) {
         print_debug("Receive \"Status\" command\n");
-        ret = pthread_mutex_trylock(&g_start_test_lock);
+        ret = pthread_mutex_trylock(&(cptt->test_launched_lock));
         if (ret == 0) {
-            pthread_mutex_unlock(&g_start_test_lock);
+            pthread_mutex_unlock(&(cptt->test_launched_lock));
             n = write(sock,"Ready\n",6);
             if (n < 0) {
                 close(sock);
