@@ -20,8 +20,7 @@ Sample workload-definition.json file:
    [
     {
       "thread_count":4,
-      "obj_start_num":1,
-      "obj_end_num":10000,
+      "total_ops":1,
       "op_type":1,
       "object_size":80000000
     }
