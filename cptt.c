@@ -16,11 +16,14 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
-#define CONFIG_FILE "/work/ceph2/ceph/src/ceph.conf"
+
 #define OPERATION_WRITE 1
 #define OPERATION_READ 2
 #define OPERATION_DELETE 3
+
+#define CONFIG_FILE "/work/ceph2/ceph/src/ceph.conf"
 #define PORT_NUMBER 7777
+
 
 #define DEBUG 1
 #define INFO 1 
@@ -28,7 +31,6 @@
 #define print_debug(fmt,...) do { if (DEBUG) fprintf(stderr, fmt, ##__VA_ARGS__); } while (0)
 #define print_info(fmt,...) do { if (INFO) fprintf(stderr, fmt, ##__VA_ARGS__); } while (0)
 
-#if 1 
 typedef struct {
     char *mon_ip;
     char *pool_name;
@@ -40,7 +42,8 @@ typedef struct {
     int work_id;
     int thread_id;
     unsigned long long object_id;
-    struct timespec start_time;
+    struct timeval start_time;
+    struct timeval stop_time;
     int  op_type;
     long duration;
     size_t object_size;
@@ -65,22 +68,18 @@ typedef struct {
     int work_id;
     int thread_id;
     ceph_conf_t *ceph_conf;
-    pthread_t worker_thread; // do we need it?
+    pthread_t worker_thread;
     int launched;
     int stop;
     int stopped;
     unsigned long long completed_ops;
     int op_type;
     size_t object_size;
-    struct timespec start_at;
+    int start_at;
     int op_stat_bus;
     int mgmt_bus;
     op_stat_list_t *ops_stats_link_list;
 } worker_info_t;
-
-
-
-
 
 typedef struct {
     workload_definition_t workload_def;
@@ -93,6 +92,7 @@ typedef struct {
     ceph_conf_t ceph_conf;
     pthread_mutex_t test_launched_lock;
     pthread_t listen_mgmt_requests_thread;
+    int start_at;
     int shutdown;
     int start_test;
     int test_canceled;
@@ -104,17 +104,15 @@ typedef struct {
     int sock;
     global_config_t *cptt;
 } request_struct_t;
-#endif
 
 /*****
  * Functions definitions
  *****/
-void collect_operations_statistics();
+void collect_operations_statistics(void *worker_info_void);
 int save_test_results(global_config_t *cptt);
 int delete_object(rados_ioctx_t io_ctx, char* object_name, size_t object_size, int result_bus, int work_id, int thread_id);
 void start_worker_wrapper(void *worker_info_void);
 void start_worker(worker_info_t *worker_info);
-//int launch_test(int node_id, int thread_id, char *pool_name, int objects_count, int operation_type, long object_size, time_t start_at, operation_statistics_t **op_stat_arr);
 void listen_mgmt_requests(void *cptt_void);
 int pars_workload_definition(char *root, global_config_t *cptt);
 void process_mgmt_request(void *request_struct_void);
@@ -128,10 +126,6 @@ int write_object(rados_ioctx_t io_ctx, char* object_name,size_t object_size, str
  *****/
 int main(int argc, const char **argv)
 {
-    int ret;
-    pthread_t collect_operations_statistics_thread;
-    pthread_t listen_mgmt_requests_thread;
-    
     global_config_t cptt;
     cptt.node_id=0;
     cptt.ceph_conf.pool_name=NULL;
@@ -177,10 +171,9 @@ int main(int argc, const char **argv)
                 cptt.works_info[work_id]->workers_info[thread_id]->work_id=work_id;
                 cptt.works_info[work_id]->workers_info[thread_id]->thread_id=thread_id;
                 cptt.works_info[work_id]->workers_info[thread_id]->ceph_conf=&cptt.ceph_conf;
-                //cptt.works_info[work_id]->workers_info[thread_id]->worker_thread=NULL;
                 cptt.works_info[work_id]->workers_info[thread_id]->completed_ops=0;
                 cptt.works_info[work_id]->workers_info[thread_id]->op_type=cptt.works_info[work_id]->workload_def.op_type;
-//              cptt.works_info[work_id]->workers_info[thread_id]->start_at=0; //TODO
+                cptt.works_info[work_id]->workers_info[thread_id]->start_at=cptt.start_at;
                 cptt.works_info[work_id]->workers_info[thread_id]->ops_stats_link_list=NULL;
                 cptt.works_info[work_id]->workers_info[thread_id]->launched=0;
                 cptt.works_info[work_id]->workers_info[thread_id]->stopped=0;
@@ -322,16 +315,16 @@ int save_test_results(global_config_t *cptt){
                 }
                 cur_el_in_ll=next_el_in_ll;
                 op_stat=cur_el_in_ll->op_stat;
-                fprintf(test_results_file,"%d,%d,%llu,%d,%lld.%ld,%ld,%zu,%d\n",
+                fprintf(test_results_file,"%d,%d,%llu,%d,%lld.%ld,%ld,%zu,%s\n",
 op_stat->work_id,
 op_stat->thread_id,
 op_stat->object_id,
 op_stat->op_type,
 (long long) op_stat->start_time.tv_sec,
-(long)round(op_stat->start_time.tv_nsec / 1.0e6),
+(long)round(op_stat->start_time.tv_usec / 1.0e3),
 op_stat->duration,
 op_stat->object_size,
-op_stat->status);
+strerror(-op_stat->status));
                 next_el_in_ll=cur_el_in_ll->prev;
                 cur_el_in_ll=NULL;                    
             }
@@ -347,31 +340,28 @@ op_stat->status);
  *
  *
  *****/
-int write_object(rados_ioctx_t io_ctx, char* object_name,size_t object_size, struct timespec *start_time, long *duration, int *status){
-    struct timespec stop_time;
-    int ret = 0;
+#if 0
+int write_object(rados_ioctx_t io_ctx, char* object_name,size_t object_size, struct timeval *start_time, struct timeval *stop_time, int *status){
     char* buf = (char*)malloc(object_size*sizeof(char));
 
-    clock_gettime(CLOCK_REALTIME, start_time);
-    ret = rados_write_full(io_ctx, object_name, buf, object_size);
-    clock_gettime(CLOCK_REALTIME, &stop_time);
+    gettimeofday(start_time,NULL);
+    int ret = rados_write_full(io_ctx, object_name, buf, object_size);
+    gettimeofday(stop_time,NULL);
 
     free(buf);
 
-    *duration=round(stop_time.tv_nsec / 1.0e6) + stop_time.tv_sec*1000 - round(start_time->tv_nsec / 1.0e6) - start_time->tv_sec*1000;
     *status=ret;
 
     return 0;
 }
-#if 0
 /*****
  *
  *
  *
  *****/
+
 int read_object(rados_ioctx_t io_ctx, char* object_name,size_t object_size, int operations_statistics_msg_bus, int work_id, int thread_id){
-    long long ms_start, ms_end, ms_total;
-    struct timespec start_time;
+    struct timespec stop_time;
     struct timespec stop_time;
     int ret = 0;
     operation_statistics_t operation_statistics;
@@ -485,7 +475,6 @@ void receive_worker_mgmt_command_loop(void *worker_info_void){
  *
  *
  *****/
-//int launch_test(int node_id, int thread_id, char *pool_name, int objects_count, int operation_type, long object_size, time_t start_at, operation_statistics_t **op_stat_arr){
 void start_worker(worker_info_t *worker_info){
     int ret;
 
@@ -501,7 +490,7 @@ void start_worker(worker_info_t *worker_info){
 
     #if 1
     //TODO: directly pass mon_ip and keyring without any configuration filesa
-    printf("Worker%d,Main: start init ceph\n", worker_info->thread_id);
+    print_debug("Worker%d,Main: start init ceph\n", worker_info->thread_id);
     ret = rados_create(&rados, "admin");
     if (ret < 0) {
         fprintf(stderr,"Worker%d,Main: couldn't initialize rados! error %d\n", worker_info->thread_id, ret);
@@ -509,7 +498,7 @@ void start_worker(worker_info_t *worker_info){
         close(worker_info->op_stat_bus);
         return;
     }
-    printf("Worker%d,Main: Init succes, start configure\n", worker_info->thread_id);
+    print_debug("Worker%d,Main: Init succes, start configure\n", worker_info->thread_id);
     ret = rados_conf_read_file(rados, CONFIG_FILE);
     if (ret < 0) {
         fprintf(stderr, "Worker%d,Main: failed to parse config file %s! error %d\n", worker_info->thread_id, CONFIG_FILE, ret);
@@ -518,7 +507,7 @@ void start_worker(worker_info_t *worker_info){
         return;
     }
     #endif
-    printf("Worker%d,Main: config success, start connect\n", worker_info->thread_id);
+    print_debug("Worker%d,Main: config success, start connect\n", worker_info->thread_id);
     ret = rados_connect(rados);
     if (ret < 0) {
         fprintf(stderr,"Worker%d,Main: couldn't connect to cluster! error %d\n", worker_info->thread_id, ret);
@@ -527,7 +516,7 @@ void start_worker(worker_info_t *worker_info){
         return;
     }
 
-    printf("Worker%d,Main: connect succes, start ioctx create\n", worker_info->thread_id); 
+    print_debug("Worker%d,Main: connect succes, start ioctx create\n", worker_info->thread_id); 
     ret = rados_ioctx_create(rados, worker_info->ceph_conf->pool_name, &io_ctx);
     if (ret < 0) {
         fprintf(stderr,"Worker%d,Main: couldn't set up ioctx! error %d. Pool=%s\n", worker_info->thread_id, ret, worker_info->ceph_conf->pool_name);
@@ -536,41 +525,47 @@ void start_worker(worker_info_t *worker_info){
         close(worker_info->op_stat_bus);
         return;
     }
-    printf("Worker%d,Main: io create succes\n", worker_info->thread_id);
+    print_debug("Worker%d,Main: io create succes\n", worker_info->thread_id);
     while(1) {
-        #if 0
-        //TODO: change to timespec comparation
         if (time(0)>=worker_info->start_at){
             break;
         }
-        #else
-        break;
-        #endif
+        if(worker_info->stop == 1){
+            print_debug("Worker%d,Main: worker_info->stop is true, shutting down.\n", worker_info->thread_id);
+            rados_shutdown(rados);
+            worker_info->stopped=1;
+            close(worker_info->op_stat_bus);
+            return;
+        }
     }
     //TODO: change to more memory safe operations[1]
-    char *object_prefix="testobject";
     char *object_name = malloc(50*sizeof(char));
+
     operation_statistics_t op_stat;
-    unsigned long long object_id=0;
 
-#if 1
+    op_stat.node_id=worker_info->node_id;
+    op_stat.work_id=worker_info->work_id;
+    op_stat.thread_id=worker_info->thread_id;
+    op_stat.op_type=worker_info->op_type;
+    op_stat.object_size=worker_info->object_size;
+    op_stat.object_id=0;
+
     while (1){
-        print_debug("Worker%d,Main: Write object %llu\n", worker_info->thread_id,object_id);
+        op_stat.object_id++;
+        print_debug("Worker%d,Main: Write object %llu\n", op_stat.thread_id,op_stat.object_id);
         //TODO: change to more memory safe operations[2]
-        sprintf(object_name, "cptt-n%d-w%d-t%d-o%llu", worker_info->node_id, worker_info->work_id, worker_info->thread_id, object_id);
+        sprintf(object_name, "cptt-n%d-w%d-t%d-o%llu", op_stat.node_id, op_stat.work_id, op_stat.thread_id, op_stat.object_id);
 
-        op_stat.node_id=worker_info->node_id;
-        op_stat.work_id=worker_info->work_id;
-        op_stat.thread_id=worker_info->thread_id;
-        op_stat.object_id=object_id;
-        op_stat.op_type=worker_info->op_type;
-        op_stat.object_size=worker_info->object_size;
+        char* buf = (char*)malloc(op_stat.object_size*sizeof(char));
+
+        gettimeofday(&(op_stat.start_time),NULL);
+
         if (worker_info->op_type == OPERATION_WRITE) {
-            ret = write_object(io_ctx,object_name, worker_info->object_size, &(op_stat.start_time), &(op_stat.duration), &(op_stat.status));
+            ret=rados_write_full(io_ctx, object_name, buf, op_stat.object_size);
         } else if (worker_info->op_type == OPERATION_READ) {
-//           ret = read_object(io_ctx,object_name, object_size, op_stat_arr[object_id], node_id, thread_id);
+            ret=rados_read(io_ctx, object_name, buf, op_stat.object_size, 0);
         } else if (worker_info->op_type == OPERATION_DELETE) {
-//           ret = delete_object(io_ctx, object_name, 0, op_stat_arr[object_id], node_id, thread_id);
+            ret=rados_remove(io_ctx, object_name);
         } else {
             fprintf(stderr,"Worker%d,Main: Unknown operation type\n", worker_info->thread_id);
             if (io_ctx) {
@@ -582,17 +577,24 @@ void start_worker(worker_info_t *worker_info){
             worker_info->stopped=1;
             return;
         }
-        print_debug("Worker%d,Main: finish write object %llu\n", worker_info->thread_id,object_id);
-
+        gettimeofday(&(op_stat.stop_time),NULL);
+        
+        free(buf);
+        if(ret < 0){
+            op_stat.status=ret;    
+        } else {
+            op_stat.status=0;
+        }
+        op_stat.duration=op_stat.stop_time.tv_sec * 1000 + round(op_stat.stop_time.tv_usec / 1000) - op_stat.start_time.tv_sec * 1000 - round(op_stat.start_time.tv_usec / 1000);
         write(worker_info->op_stat_bus,&op_stat,sizeof(operation_statistics_t));
 
+        print_debug("Worker%d,Main: finish write object %llu\n", worker_info->thread_id,op_stat.object_id);
+
         if(worker_info->stop == 1){
-        print_debug("Worker%d,Main: stopping\n", worker_info->thread_id);
+            print_debug("Worker%d,Main: stopping\n", worker_info->thread_id);
             break;
         }
-        object_id++;
     }
-#endif
     free(object_name);
     if (io_ctx) {
         rados_ioctx_destroy(io_ctx);
@@ -691,6 +693,7 @@ void collect_operations_statistics(void *worker_info_void){
             
         } else {
             worker_info->ops_stats_link_list=prev_el_in_ll;            
+            worker_info->stop=1;
             print_debug("Worker%d,collector: op stat bus is broken, shutdown\n", worker_info->thread_id);
             break;
         }
@@ -723,16 +726,12 @@ int pars_workload_definition(char *buff, global_config_t *cptt) {
     cptt->ceph_conf.pool_name=(char *)malloc(strlen(tmp_str)*sizeof(char));
     strcpy(cptt->ceph_conf.pool_name,tmp_str);
 
-
-    #if 0
-    //TODO
     tmp_object1 = json_object_get(root, "start_at");
     if(!json_is_integer(tmp_object1)){
         fprintf(stderr, "error: start_at is not string\n");
         return 1;
     }
-    =json_integer_value(tmp_object1);
-    #endif 
+    cptt->start_at=json_integer_value(tmp_object1);
 
     tmp_object1 = json_object_get(root, "works");
     if(!json_is_array(tmp_object1)){
