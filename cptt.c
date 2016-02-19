@@ -16,14 +16,9 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
-
 #define OPERATION_WRITE 1
 #define OPERATION_READ 2
 #define OPERATION_DELETE 3
-
-#define CONFIG_FILE "/work/ceph2/ceph/src/ceph.conf"
-#define PORT_NUMBER 7777
-
 
 #define DEBUG 1
 #define INFO 1 
@@ -32,9 +27,11 @@
 #define print_info(fmt,...) do { if (INFO) fprintf(stderr, fmt, ##__VA_ARGS__); } while (0)
 
 typedef struct {
-    char *mon_ip;
+    char *mon_host;
+    char *cluster_name;
+    char *user;
+    char *key;
     char *pool_name;
-    char *keyring;
 } ceph_conf_t;
 
 typedef struct {
@@ -92,6 +89,7 @@ typedef struct {
     ceph_conf_t ceph_conf;
     pthread_mutex_t test_launched_lock;
     pthread_t listen_mgmt_requests_thread;
+    int port_number;
     int start_at;
     int shutdown;
     int start_test;
@@ -131,12 +129,20 @@ int main(int argc, const char **argv)
     cptt.ceph_conf.pool_name=NULL;
     cptt.shutdown=0;
     cptt.test_canceled=0;
+
+    cptt.works_count=0;
+    cptt.works_info=NULL;
+
+    //TODO: parse argv. improve
+    if(argc != 2){
+        fprintf(stderr, "Usage: ./cptt <port number>\n");
+        return 1;
+    }
+    cptt.port_number=atoi(argv[1]);
+
     if (pthread_mutex_init(&cptt.test_launched_lock, NULL) != 0){
         fprintf(stderr,"Main: mutex init failed\n");
     }
-    cptt.works_count=0;
-    cptt.works_info=NULL;
-    //TODO: parse argv. init ip, port, is daemon
 
     if(pthread_create(&cptt.listen_mgmt_requests_thread, NULL,(void *) &listen_mgmt_requests,&cptt)) {
         fprintf(stderr, "Main: Error creating thread\n");
@@ -158,6 +164,7 @@ int main(int argc, const char **argv)
                 }
                 return 0;
             }
+            sleep(10);
         }
         print_debug("Main: Starting test\n");
         for(int work_id=0;work_id<cptt.works_count;work_id++) {
@@ -234,6 +241,8 @@ int main(int argc, const char **argv)
                     }
                 }
             }
+            
+            sleep(10);
         }
         
         print_debug("Main: all works is finished\n");
@@ -335,108 +344,6 @@ strerror(-op_stat->status));
     return 0;
 }
 
-/*****
- *
- *
- *
- *****/
-#if 0
-int write_object(rados_ioctx_t io_ctx, char* object_name,size_t object_size, struct timeval *start_time, struct timeval *stop_time, int *status){
-    char* buf = (char*)malloc(object_size*sizeof(char));
-
-    gettimeofday(start_time,NULL);
-    int ret = rados_write_full(io_ctx, object_name, buf, object_size);
-    gettimeofday(stop_time,NULL);
-
-    free(buf);
-
-    *status=ret;
-
-    return 0;
-}
-/*****
- *
- *
- *
- *****/
-
-int read_object(rados_ioctx_t io_ctx, char* object_name,size_t object_size, int operations_statistics_msg_bus, int work_id, int thread_id){
-    struct timespec stop_time;
-    struct timespec stop_time;
-    int ret = 0;
-    operation_statistics_t operation_statistics;
-
-    char *buf=(char*)malloc(object_size*sizeof(char));
-
-    clock_gettime(CLOCK_REALTIME, &start_time);
-    ret = rados_read(io_ctx, object_name, buf, object_size, 0);
-    clock_gettime(CLOCK_REALTIME, &stop_time);
-
-    free(buf);
-
-    if (ret < 0) {
-        printf("couldn't read object! error %d\n", ret);
-        ret = EXIT_FAILURE;
-        return -1;
-    } else {
-        ms_start = round(start_time.tv_nsec / 1.0e6) + start_time.tv_sec*1000;
-        ms_end = round(stop_time.tv_nsec / 1.0e6) + stop_time.tv_sec*1000;
-        ms_total = ms_end - ms_start;
-    }
-
-        operation_statistics.work_id=work_id;
-    operation_statistics.thread_id=thread_id;
-    operation_statistics.start_time=start_time;
-    operation_statistics.op_type=OPERATION_READ;
-    operation_statistics.duration=ms_total;
-    operation_statistics.object_size=object_size;
-        operation_statistics.status=1;
-
-    write(operations_statistics_msg_bus, &operation_statistics, sizeof(operation_statistics_t));
-
-    return 0;
-}
-
-/*****
- *
- *
- *
- *****/
-int delete_object(rados_ioctx_t io_ctx, char* object_name, size_t object_size, int operations_statistics_msg_bus, int work_id, int thread_id){
-    int ret = 0;
-    long long ms_start, ms_end, ms_total;
-    struct timespec start_time;
-    struct timespec stop_time;
-    operation_statistics_t operation_statistics;
-
-    clock_gettime(CLOCK_REALTIME, &start_time);
-    ret = rados_remove(io_ctx, object_name);
-    clock_gettime(CLOCK_REALTIME, &stop_time);
-
-    if (ret < 0 && errno!=2) {
-        printf("couldn't delete object! error %d,%d,%s\n", ret, errno,strerror(errno));
-        ret = EXIT_FAILURE;
-        return -1;
-    } else {
-        ms_start = round(start_time.tv_nsec / 1.0e6) + start_time.tv_sec*1000;
-        ms_end = round(stop_time.tv_nsec / 1.0e6) + stop_time.tv_sec*1000;
-        ms_total = ms_end - ms_start;
-    }
-
-    operation_statistics.work_id=work_id;
-    operation_statistics.thread_id=thread_id;
-    operation_statistics.start_time=start_time;
-    operation_statistics.op_type=1;
-    operation_statistics.duration=ms_total;
-    operation_statistics.object_size=0;
-        operation_statistics.status=1;
-
-    write(operations_statistics_msg_bus, &operation_statistics, sizeof(operation_statistics_t));
-
-    return 0;
-}
-#endif
-
 void receive_worker_mgmt_command_loop(void *worker_info_void){
     worker_info_t *worker_info=(worker_info_t *)worker_info_void;
     char command[255];
@@ -488,25 +395,32 @@ void start_worker(worker_info_t *worker_info){
         return;
     }
 
-    #if 1
-    //TODO: directly pass mon_ip and keyring without any configuration filesa
+
     print_debug("Worker%d,Main: start init ceph\n", worker_info->thread_id);
-    ret = rados_create(&rados, "admin");
+    ret = rados_create2(&rados, worker_info->ceph_conf->cluster_name, worker_info->ceph_conf->user, 0 );
     if (ret < 0) {
-        fprintf(stderr,"Worker%d,Main: couldn't initialize rados! error %d\n", worker_info->thread_id, ret);
+        fprintf(stderr,"Worker%d,Main: couldn't initialize rados! %s, cluster:%s, user:%s\n", worker_info->thread_id, strerror(errno),worker_info->ceph_conf->cluster_name, worker_info->ceph_conf->user);
         worker_info->stopped=1;
         close(worker_info->op_stat_bus);
         return;
     }
-    print_debug("Worker%d,Main: Init succes, start configure\n", worker_info->thread_id);
-    ret = rados_conf_read_file(rados, CONFIG_FILE);
+
+    ret = rados_conf_set(rados, "mon_host", worker_info->ceph_conf->mon_host);
     if (ret < 0) {
-        fprintf(stderr, "Worker%d,Main: failed to parse config file %s! error %d\n", worker_info->thread_id, CONFIG_FILE, ret);
+        fprintf(stderr, "Worker%d,Main: failed to set mon_host. %s\n", worker_info->thread_id, strerror(errno));
         worker_info->stopped=1;
         close(worker_info->op_stat_bus);
         return;
     }
-    #endif
+
+    ret = rados_conf_set(rados, "key", worker_info->ceph_conf->key);
+    if (ret < 0) {
+        print_debug("Worker%d,Main: failed to set keyring. %s\n", worker_info->thread_id, strerror(-errno));
+        worker_info->stopped=1;
+        close(worker_info->op_stat_bus);
+        return;
+    }
+
     print_debug("Worker%d,Main: config success, start connect\n", worker_info->thread_id);
     ret = rados_connect(rados);
     if (ret < 0) {
@@ -655,6 +569,7 @@ void start_worker_wrapper(void *worker_info_void){
 	    worker_info->stopped=1;
             return;
         }
+        sleep(5);
     }
 
 }
@@ -664,7 +579,6 @@ void start_worker_wrapper(void *worker_info_void){
  *
  *
  *****/
-#if 1
 void collect_operations_statistics(void *worker_info_void){
     int ret;
     worker_info_t *worker_info=(worker_info_t *)worker_info_void;
@@ -679,7 +593,6 @@ void collect_operations_statistics(void *worker_info_void){
 	op_stat=(operation_statistics_t *)malloc(sizeof(operation_statistics_t));
         ret=read(worker_info->op_stat_bus,op_stat,sizeof(operation_statistics_t));
         if (ret>0) {
-	#if 1
 		cur_el_in_ll=(op_stat_list_t *)malloc(sizeof(op_stat_list_t));
                 print_debug("Worker%d,collector: receive object num %llu\n", worker_info->thread_id,op_stat->object_id);
 		cur_el_in_ll->op_stat=op_stat;
@@ -689,8 +602,6 @@ void collect_operations_statistics(void *worker_info_void){
 
 		prev_el_in_ll=cur_el_in_ll;
 		cur_el_in_ll=NULL;
-	#endif
-            
         } else {
             worker_info->ops_stats_link_list=prev_el_in_ll;            
             worker_info->stop=1;
@@ -701,7 +612,6 @@ void collect_operations_statistics(void *worker_info_void){
 
     return ;
 }
-#endif
 
 /*****
  *
@@ -715,16 +625,58 @@ int pars_workload_definition(char *buff, global_config_t *cptt) {
     json_t *tmp_object2;
     json_t *tmp_object3;
 
+    const char *tmp_str;
+
     root = json_loads(buff,0, &error);
+    
+    tmp_object1 = json_object_get(root, "mon_host");
+    if(!json_is_string(tmp_object1)){
+        fprintf(stderr, "error: mon_host is not string\n");
+        return 1;
+    }
+    tmp_str=json_string_value(tmp_object1);
+    cptt->ceph_conf.mon_host=(char *)malloc(strlen(tmp_str)*sizeof(char));
+    strcpy(cptt->ceph_conf.mon_host,tmp_str);
+    
+    tmp_object1 = json_object_get(root, "cluster_name");
+    if(!json_is_string(tmp_object1)){
+        fprintf(stderr, "error: user is not string\n");
+        return 1;
+    }
+    tmp_str=json_string_value(tmp_object1);
+    cptt->ceph_conf.cluster_name=(char *)malloc(strlen(tmp_str)*sizeof(char));
+    strcpy(cptt->ceph_conf.cluster_name,tmp_str);
+    
+    tmp_object1 = json_object_get(root, "user");
+    if(!json_is_string(tmp_object1)){
+        fprintf(stderr, "error: user is not string\n");
+        return 1;
+    }
+    tmp_str=json_string_value(tmp_object1);
+    cptt->ceph_conf.user=(char *)malloc(strlen(tmp_str)*sizeof(char));
+    strcpy(cptt->ceph_conf.user,tmp_str);
+
+    tmp_object1 = json_object_get(root, "key");
+    if(!json_is_string(tmp_object1)){
+        fprintf(stderr, "error: key is not string\n");
+        return 1;
+    }
+    tmp_str=json_string_value(tmp_object1);
+    cptt->ceph_conf.key=(char *)malloc(strlen(tmp_str)*sizeof(char));
+    strcpy(cptt->ceph_conf.key,tmp_str);
 
     tmp_object1 = json_object_get(root, "pool_name");
     if(!json_is_string(tmp_object1)){
         fprintf(stderr, "error: pool_name is not string\n");
         return 1;
     }
-    const char *tmp_str=json_string_value(tmp_object1);
+    tmp_str=json_string_value(tmp_object1);
     cptt->ceph_conf.pool_name=(char *)malloc(strlen(tmp_str)*sizeof(char));
     strcpy(cptt->ceph_conf.pool_name,tmp_str);
+
+
+
+
 
     tmp_object1 = json_object_get(root, "start_at");
     if(!json_is_integer(tmp_object1)){
@@ -924,7 +876,7 @@ void listen_mgmt_requests(void *cptt_void) {
 
     server.sin_family = AF_INET;
     server.sin_addr.s_addr = INADDR_ANY;
-    server.sin_port = htons(PORT_NUMBER);
+    server.sin_port = htons(cptt->port_number);
 
     if( bind(socket_desc,(struct sockaddr *)&server , sizeof(server)) < 0){
         fprintf(stderr,"bind failed. Error");
