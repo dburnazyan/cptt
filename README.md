@@ -3,12 +3,15 @@
 CPTT was created for testing Ceph object storage through librados library.
 
 Simple to use:
+
 0. Build: install.sh
 1. Launch: ```cptt 7777 &```
 2. Start test: ```cat workload-definition.json | nc localhost 7777```
 3. Check status: ```echo "Status" | nc localhost 7777``` -> Whait for "Ready" status
 4. View results in results.csv file in working dir
+
 To cancel test: ```echo "Cancel" | nc localhost 7777```
+
 To shutdown: ```echo "Shutdown" | nc localhost 7777```
 
 Sample workload-definition.json file:
