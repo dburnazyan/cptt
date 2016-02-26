@@ -79,12 +79,14 @@ typedef struct {
 } worker_info_t;
 
 typedef struct {
+    char *work_name;
     workload_definition_t workload_def;
     int work_completed;
     worker_info_t **workers_info;
 } work_info_t;    
 
 typedef struct {
+    char *node_name;
     int node_id;
     ceph_conf_t ceph_conf;
     pthread_mutex_t test_launched_lock;
@@ -93,6 +95,8 @@ typedef struct {
     int start_at;
     int shutdown;
     int start_test;
+    int test_finished;
+    int test_data_has_collected;
     int test_canceled;
     int works_count;
     work_info_t **works_info;
@@ -129,7 +133,7 @@ int main(int argc, const char **argv)
     cptt.ceph_conf.pool_name=NULL;
     cptt.shutdown=0;
     cptt.test_canceled=0;
-
+    cptt.test_finished=0;
     cptt.works_count=0;
     cptt.works_info=NULL;
 
@@ -164,7 +168,6 @@ int main(int argc, const char **argv)
                 }
                 return 0;
             }
-            sleep(10);
         }
         print_debug("Main: Starting test\n");
         for(int work_id=0;work_id<cptt.works_count;work_id++) {
@@ -230,6 +233,7 @@ int main(int argc, const char **argv)
                 }
             }
             if(completed_works >= cptt.works_count){
+                cptt.test_finished=1;
                 print_debug("Main: all works is completed\n");
                 break;
             }
@@ -242,7 +246,6 @@ int main(int argc, const char **argv)
                 }
             }
             
-            sleep(10);
         }
         
         print_debug("Main: all works is finished\n");
@@ -269,6 +272,21 @@ int main(int argc, const char **argv)
         }
 
         save_test_results(&cptt);
+        while(1){
+            if(cptt.test_canceled == 1){
+                break;
+            }
+            if (cptt.test_data_has_collected == 1){
+                break; 
+            }
+            if(cptt.shutdown == 1) {
+                if(pthread_cancel(cptt.listen_mgmt_requests_thread)) {
+                    fprintf(stderr, "Main: Error joining thread\n");
+                    exit(1);
+                }
+                return 0;
+            }
+        }
 
         for(int work_id=0;work_id<cptt.works_count;work_id++) {
             print_debug("Main: Free memory for  work: %d\n",work_id);
@@ -292,7 +310,9 @@ int main(int argc, const char **argv)
             }
             print_debug("Main: free memory for work %d\n", work_id);
             free(cptt.works_info[work_id]);
-        }        
+        } 
+        cptt.test_data_has_collected=0;       
+        cptt.test_finished=0;
         cptt.test_canceled=0;
         cptt.start_test=0;
         print_debug("Main: Test finished\n");
@@ -569,7 +589,6 @@ void start_worker_wrapper(void *worker_info_void){
 	    worker_info->stopped=1;
             return;
         }
-        sleep(5);
     }
 
 }
@@ -628,6 +647,15 @@ int pars_workload_definition(char *buff, global_config_t *cptt) {
     const char *tmp_str;
 
     root = json_loads(buff,0, &error);
+
+    tmp_object1 = json_object_get(root, "node_name");
+    if(!json_is_string(tmp_object1)){
+        fprintf(stderr, "error: node_name is not string\n");
+        return 1;
+    }
+    tmp_str=json_string_value(tmp_object1);
+    cptt->node_name=(char *)malloc(strlen(tmp_str)*sizeof(char));
+    strcpy(cptt->node_name,tmp_str);
     
     tmp_object1 = json_object_get(root, "mon_host");
     if(!json_is_string(tmp_object1)){
@@ -676,8 +704,6 @@ int pars_workload_definition(char *buff, global_config_t *cptt) {
 
 
 
-
-
     tmp_object1 = json_object_get(root, "start_at");
     if(!json_is_integer(tmp_object1)){
         fprintf(stderr, "error: start_at is not string\n");
@@ -702,6 +728,16 @@ int pars_workload_definition(char *buff, global_config_t *cptt) {
             fprintf(stderr, "error: commit %d is not an object\n", i + 1);
             return -1;
         }
+
+        tmp_object3 = json_object_get(tmp_object2, "work_name");
+        if(!json_is_string(tmp_object3)){
+            fprintf(stderr, "error: work_name is not string\n");
+            return -1;
+        }
+        tmp_str=json_string_value(tmp_object3);
+        cptt->works_info[i]->work_name=(char *)malloc(strlen(tmp_str)*sizeof(char));
+        strcpy(cptt->works_info[i]->work_name,tmp_str);
+        
         tmp_object3 = json_object_get(tmp_object2, "thread_count");
         if(!json_is_integer(tmp_object3)){
             fprintf(stderr, "error: start_at is not string\n");
@@ -757,12 +793,12 @@ void process_mgmt_request(void *request_struct_void){
         return;
     }
 
-    if (strcmp(buffer,"Status\n")==0) {
+    if (strcmp(buffer,"Status")==0) {
         print_debug("Receive \"Status\" command\n");
         ret = pthread_mutex_trylock(&(cptt->test_launched_lock));
         if (ret == 0) {
             pthread_mutex_unlock(&(cptt->test_launched_lock));
-            n = write(sock,"Ready\n",6);
+            n = write(sock,"Ready",5);
             if (n < 0) {
                 close(sock);
                 fprintf(stderr,"ERROR writing to socket");
@@ -771,20 +807,30 @@ void process_mgmt_request(void *request_struct_void){
             close(sock);
             return;
         } else if (ret == EBUSY) {
-            n = write(sock,"Busy\n",5);
-            if (n < 0) {
+            if (cptt->test_finished == 0) {
+                n = write(sock,"Busy",4);
+                if (n < 0) {
+                    close(sock);
+                    fprintf(stderr,"ERROR writing to socket");
+                    return;
+                }
                 close(sock);
-                fprintf(stderr,"ERROR writing to socket");
+                return;
+            } else {
+                n = write(sock,"Finished",8);
+                if (n < 0) {
+                    close(sock);
+                    fprintf(stderr,"ERROR writing to socket");
+                    return;
+                }
+                close(sock);
                 return;
             }
-            close(sock);
-            return;
         }
-    } else if (strcmp(buffer, "Cancel\n")==0) {
+    } else if (strcmp(buffer, "Cancel")==0) {
         print_debug("Receive \"Cancel\" command\n");
-        //TODO
         cptt->test_canceled=1;
-        n = write(sock,"Ok.\n",4);
+        n = write(sock,"Ok.",3);
         if (n < 0) {
             close(sock);
             fprintf(stderr,"ERROR writing to socket");
@@ -792,11 +838,10 @@ void process_mgmt_request(void *request_struct_void){
         }
         close(sock);
         return;
-    } else if (strcmp(buffer, "Shutdown\n")==0) {
+    } else if (strcmp(buffer, "Shutdown")==0) {
         print_debug("Receive \"Shutdown\" command\n");
-        //TODO
         cptt->shutdown=1;
-        n = write(sock,"Ok.\n",4);
+        n = write(sock,"Ok.",3);
         if (n < 0) {
             close(sock);
             fprintf(stderr,"ERROR writing to socket");
@@ -804,10 +849,49 @@ void process_mgmt_request(void *request_struct_void){
         }
         close(sock);
         return;
+    } else if (strcmp(buffer, "Receive")==0) {
+        print_debug("Receive \"Receive\" command\n");
+        if (cptt->test_finished == 1){
+            bzero(buffer,20000);
+            operation_statistics_t *op_stat;
+            for(int work_id=0;work_id<cptt->works_count;work_id++) {
+                for (int thread_id=0; thread_id < cptt->works_info[work_id]->workload_def.thread_count ; thread_id++){
+                    op_stat_list_t *next_el_in_ll=cptt->works_info[work_id]->workers_info[thread_id]->ops_stats_link_list;
+                    op_stat_list_t *cur_el_in_ll=NULL;
+                    while(1){
+                        if(next_el_in_ll == NULL){
+                            break;
+                        }
+                        cur_el_in_ll=next_el_in_ll;
+                        op_stat=cur_el_in_ll->op_stat;
+                        sprintf(buffer,"%s,%s,%d,%llu,%d,%lld.%ld,%ld,%zu,%s\n",
+cptt->node_name,
+cptt->works_info[work_id]->work_name,
+op_stat->thread_id + 1,
+op_stat->object_id,
+op_stat->op_type,
+(long long) op_stat->start_time.tv_sec,
+(long)round(op_stat->start_time.tv_usec / 1.0e3),
+op_stat->duration,
+op_stat->object_size,
+strerror(-op_stat->status));
+                        write(sock, buffer, strlen(buffer));
+                        next_el_in_ll=cur_el_in_ll->prev;
+                        cur_el_in_ll=NULL;
+                    }
+                }
+            }             
+            cptt->test_data_has_collected=1;
+        } else {
+            close(sock);
+            return;
+       }
+       close(sock);
+       return;    
     } else {
         root = json_loads(buffer,0, &error);
         if ( root == NULL){
-            n = write(sock,"Uncknown command\n",17);
+            n = write(sock,"Uncknown command",16);
             if (n < 0) {
                 close(sock);
                 fprintf(stderr,"ERROR writing to socket");
@@ -822,7 +906,7 @@ void process_mgmt_request(void *request_struct_void){
                 if(pars_workload_definition(buffer, cptt) == 0){
                     json_decref(root);
                     cptt->start_test=1;
-                    n = write(sock,"Launched\n",9);
+                    n = write(sock,"Launched",8);
                     if (n < 0) {
                         close(sock);
                         fprintf(stderr,"ERROR writing to socket");
@@ -833,7 +917,7 @@ void process_mgmt_request(void *request_struct_void){
                 } else {
                     json_decref(root);
                     pthread_mutex_unlock(&(cptt->test_launched_lock));
-                    n = write(sock,"Error\n",6);
+                    n = write(sock,"Error",5);
                     if (n < 0) {
                         close(sock);
                         fprintf(stderr,"ERROR writing to socket");
@@ -843,7 +927,7 @@ void process_mgmt_request(void *request_struct_void){
                     return;
                 }
             } else if (ret == EBUSY) {
-                n = write(sock,"Busy\n",5);
+                n = write(sock,"Busy",4);
                 if (n < 0) {
                     close(sock);
                     fprintf(stderr,"ERROR writing to socket");
